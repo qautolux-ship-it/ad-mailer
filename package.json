@@ -1,0 +1,9 @@
+{
+  "name": "centmailer",
+  "version": "1.0.0",
+  "dependencies": {
+    "nodemailer": "6.9.7",
+    "uuid": "9.0.0",
+    "@libsql/client": "^0.14.0"
+  }
+}

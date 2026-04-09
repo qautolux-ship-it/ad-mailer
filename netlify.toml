@@ -1,0 +1,22 @@
+[build]
+  publish = "."
+
+[functions]
+  node_bundler = "nft"
+
+[functions."app"]
+  timeout = 26
+
+[[scheduled-functions]]
+  name = "cron"
+  schedule = "*/5 * * * *"
+
+[[redirects]]
+  from = "/api/app"
+  to = "/.netlify/functions/app"
+  status = 200
+
+[[redirects]]
+  from = "/"
+  to = "/app.html"
+  status = 200

@@ -1,0 +1,567 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>CentMailer Pro — Login</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"/>
+<style>
+:root {
+  --bg: #08090e;
+  --bg2: #0d0e17;
+  --surface: #12131f;
+  --surface2: #181928;
+  --border: rgba(255,255,255,0.07);
+  --border2: rgba(255,255,255,0.12);
+  --text: #e2e8f0;
+  --muted: #64748b;
+  --muted2: #475569;
+  --primary: #6366f1;
+  --primary-light: #818cf8;
+  --primary-glow: rgba(99,102,241,0.2);
+  --green: #10b981;
+  --red: #ef4444;
+  --red-glow: rgba(239,68,68,0.15);
+  --font: 'Inter', system-ui, sans-serif;
+  --mono: 'JetBrains Mono', monospace;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body {
+  font-family: var(--font);
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  line-height: 1.5;
+  overflow: hidden;
+}
+
+.bg-grid {
+  position: fixed;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(99,102,241,0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(99,102,241,0.03) 1px, transparent 1px);
+  background-size: 40px 40px;
+  pointer-events: none;
+  z-index: 0;
+}
+.bg-glow {
+  position: fixed;
+  top: -200px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 600px;
+  height: 600px;
+  background: radial-gradient(circle, rgba(99,102,241,0.12) 0%, transparent 70%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.wrap {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  max-width: 420px;
+  padding: 20px;
+  animation: fadeUp .4s ease both;
+}
+
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(20px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.logo-area {
+  text-align: center;
+  margin-bottom: 32px;
+}
+.logo-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--primary-glow);
+  border: 1px solid rgba(99,102,241,0.3);
+  border-radius: 20px;
+  padding: 3px 12px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--primary-light);
+  letter-spacing: .05em;
+  margin-bottom: 14px;
+}
+.logo-badge .dot {
+  width: 6px; height: 6px;
+  background: var(--green);
+  border-radius: 50%;
+  animation: blink 2s infinite;
+}
+@keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
+.logo-name {
+  font-size: 28px;
+  font-weight: 800;
+  letter-spacing: -.04em;
+  color: #fff;
+}
+.logo-name span { color: var(--primary-light); }
+.logo-sub {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 4px;
+  font-weight: 500;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 28px;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+}
+
+.card-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: #fff;
+  margin-bottom: 4px;
+}
+.card-sub {
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 24px;
+}
+
+.panel { display: none; }
+.panel.active { display: block; }
+
+.field { margin-bottom: 16px; }
+.field label {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: .07em;
+  margin-bottom: 6px;
+}
+.input-wrap { position: relative; }
+input[type=email], input[type=password], input[type=text] {
+  width: 100%;
+  background: var(--bg);
+  border: 1px solid var(--border2);
+  color: var(--text);
+  padding: 11px 13px;
+  border-radius: 8px;
+  font-family: var(--font);
+  font-size: 13px;
+  outline: none;
+  transition: border .2s, box-shadow .2s;
+}
+input[type=email]:focus,
+input[type=password]:focus,
+input[type=text]:focus {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px var(--primary-glow);
+}
+.eye-btn {
+  position: absolute;
+  right: 11px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 15px;
+  padding: 2px;
+  line-height: 1;
+  transition: color .15s;
+}
+.eye-btn:hover { color: var(--text); }
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  width: 100%;
+  padding: 12px 18px;
+  border-radius: 8px;
+  font-family: var(--font);
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all .15s;
+  border: none;
+  margin-top: 4px;
+}
+.btn-primary {
+  background: var(--primary);
+  color: #fff;
+}
+.btn-primary:hover:not(:disabled) {
+  background: #4f46e5;
+  box-shadow: 0 4px 20px rgba(99,102,241,0.45);
+}
+.btn-primary:disabled {
+  opacity: .5;
+  cursor: not-allowed;
+}
+.btn-ghost {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--border2);
+  margin-top: 10px;
+}
+.btn-ghost:hover { color: var(--text); background: rgba(255,255,255,.04); }
+
+.link-row {
+  display: flex;
+  justify-content: center;
+  margin-top: 18px;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.link-row a {
+  color: var(--primary-light);
+  cursor: pointer;
+  text-decoration: none;
+  font-weight: 600;
+}
+.link-row a:hover { text-decoration: underline; }
+
+.alert {
+  padding: 10px 14px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 500;
+  margin-bottom: 16px;
+  display: none;
+}
+.alert.show { display: flex; align-items: flex-start; gap: 8px; }
+.alert-error {
+  background: var(--red-glow);
+  border: 1px solid rgba(239,68,68,0.25);
+  color: #fca5a5;
+}
+.alert-success {
+  background: rgba(16,185,129,0.1);
+  border: 1px solid rgba(16,185,129,0.25);
+  color: #6ee7b7;
+}
+
+.spinner {
+  width: 14px; height: 14px;
+  border: 2px solid rgba(255,255,255,0.3);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin .6s linear infinite;
+  display: none;
+}
+.btn.loading .spinner { display: inline-block; }
+.btn.loading .btn-text { display: none; }
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 18px 0;
+  color: var(--muted2);
+  font-size: 11px;
+}
+.divider::before, .divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
+.strength-bar {
+  display: flex;
+  gap: 4px;
+  margin-top: 6px;
+}
+.strength-seg {
+  height: 3px;
+  flex: 1;
+  border-radius: 2px;
+  background: var(--border2);
+  transition: background .3s;
+}
+.strength-label {
+  font-size: 10px;
+  color: var(--muted);
+  margin-top: 4px;
+  text-align: right;
+}
+
+footer {
+  text-align: center;
+  margin-top: 20px;
+  font-size: 11px;
+  color: var(--muted2);
+  font-family: var(--mono);
+}
+</style>
+</head>
+<body>
+
+<div class="bg-grid"></div>
+<div class="bg-glow"></div>
+
+<div class="wrap">
+  <div class="logo-area">
+    <div class="logo-badge"><span class="dot"></span> SECURE ACCESS</div>
+    <div class="logo-name">Cent<span>Mailer</span> Pro</div>
+    <div class="logo-sub">Email Marketing Platform</div>
+  </div>
+
+  <div class="card">
+
+    <div id="alert-box" class="alert"></div>
+
+    <!-- LOGIN PANEL -->
+    <div id="panel-login" class="panel active">
+      <div class="card-title">Welcome back</div>
+      <div class="card-sub">Sign in to your account to continue</div>
+
+      <div class="field">
+        <label>Email Address</label>
+        <input type="email" id="login-email" placeholder="you@example.com" autocomplete="email"/>
+      </div>
+      <div class="field">
+        <label>Password</label>
+        <div class="input-wrap">
+          <input type="password" id="login-pass" placeholder="••••••••" autocomplete="current-password"/>
+          <button class="eye-btn" onclick="toggleEye('login-pass',this)" tabindex="-1">👁</button>
+        </div>
+      </div>
+
+      <button class="btn btn-primary" id="btn-login" onclick="doLogin()">
+        <span class="spinner"></span>
+        <span class="btn-text">Sign In →</span>
+      </button>
+
+      <div class="link-row">
+        <a onclick="showPanel('panel-change')">Change password</a>
+      </div>
+    </div>
+
+    <!-- CHANGE PASSWORD PANEL -->
+    <div id="panel-change" class="panel">
+      <div class="card-title">Change Password</div>
+      <div class="card-sub">Enter your current password then choose a new one</div>
+
+      <div class="field">
+        <label>Email Address</label>
+        <input type="email" id="change-email" placeholder="you@example.com"/>
+      </div>
+      <div class="field">
+        <label>Current Password</label>
+        <div class="input-wrap">
+          <input type="password" id="change-current" placeholder="••••••••"/>
+          <button class="eye-btn" onclick="toggleEye('change-current',this)" tabindex="-1">👁</button>
+        </div>
+      </div>
+      <div class="field">
+        <label>New Password</label>
+        <div class="input-wrap">
+          <input type="password" id="change-new" placeholder="••••••••" oninput="checkStrength(this.value)"/>
+          <button class="eye-btn" onclick="toggleEye('change-new',this)" tabindex="-1">👁</button>
+        </div>
+        <div class="strength-bar">
+          <div class="strength-seg" id="s1"></div>
+          <div class="strength-seg" id="s2"></div>
+          <div class="strength-seg" id="s3"></div>
+          <div class="strength-seg" id="s4"></div>
+        </div>
+        <div class="strength-label" id="strength-label"></div>
+      </div>
+      <div class="field">
+        <label>Confirm New Password</label>
+        <div class="input-wrap">
+          <input type="password" id="change-confirm" placeholder="••••••••"/>
+          <button class="eye-btn" onclick="toggleEye('change-confirm',this)" tabindex="-1">👁</button>
+        </div>
+      </div>
+
+      <button class="btn btn-primary" id="btn-change" onclick="doChangePassword()">
+        <span class="spinner"></span>
+        <span class="btn-text">Update Password</span>
+      </button>
+      <div class="link-row" style="margin-top:14px">
+        <span>Forgot current password?&nbsp;</span>
+        <a onclick="doSendReset()">Send reset link</a>
+      </div>
+      <button class="btn btn-ghost" onclick="showPanel('panel-login')">← Back to Login</button>
+    </div>
+
+  </div>
+
+  <footer>v2.0 · CentMailer Pro · Secured by Firebase Auth</footer>
+</div>
+
+<script type="module">
+import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
+import {
+  getAuth,
+  signInWithEmailAndPassword,
+  updatePassword,
+  reauthenticateWithCredential,
+  EmailAuthProvider,
+  sendPasswordResetEmail
+} from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
+
+const firebaseConfig = {
+  apiKey: "AIzaSyA5r_nrSgK7lEZdG52tqLZZBh5fnQHz9ew",
+  authDomain: "allybank-478ad.firebaseapp.com",
+  databaseURL: "https://allybank-478ad-default-rtdb.firebaseio.com",
+  projectId: "allybank-478ad",
+  storageBucket: "allybank-478ad.firebasestorage.app",
+  messagingSenderId: "805352082325",
+  appId: "1:805352082325:web:90cf70bcfd1a057f4f449c",
+  measurementId: "G-GPRQK6L99L"
+};
+
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+
+window._auth = auth;
+window._signInWithEmailAndPassword = signInWithEmailAndPassword;
+window._updatePassword = updatePassword;
+window._reauthenticateWithCredential = reauthenticateWithCredential;
+window._EmailAuthProvider = EmailAuthProvider;
+window._sendPasswordResetEmail = sendPasswordResetEmail;
+</script>
+
+<script>
+function showPanel(id) {
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+  clearAlert();
+}
+
+function showAlert(msg, type) {
+  const box = document.getElementById('alert-box');
+  box.className = 'alert show alert-' + type;
+  box.innerHTML = (type === 'error' ? '⚠ ' : '✓ ') + msg;
+}
+
+function clearAlert() {
+  const box = document.getElementById('alert-box');
+  box.className = 'alert';
+  box.innerHTML = '';
+}
+
+function setLoading(btnId, on) {
+  const btn = document.getElementById(btnId);
+  btn.classList.toggle('loading', on);
+  btn.disabled = on;
+}
+
+function toggleEye(inputId, el) {
+  const inp = document.getElementById(inputId);
+  if (!inp) return;
+  if (inp.type === 'password') { inp.type = 'text'; el.textContent = '🙈'; }
+  else { inp.type = 'password'; el.textContent = '👁'; }
+}
+
+function checkStrength(val) {
+  let score = 0;
+  if (val.length >= 8) score++;
+  if (/[A-Z]/.test(val)) score++;
+  if (/[0-9]/.test(val)) score++;
+  if (/[^A-Za-z0-9]/.test(val)) score++;
+  const colors = ['', '#ef4444', '#f59e0b', '#6366f1', '#10b981'];
+  const labels = ['', 'Weak', 'Fair', 'Good', 'Strong'];
+  for (let i = 1; i <= 4; i++) {
+    document.getElementById('s' + i).style.background = i <= score ? colors[score] : '';
+  }
+  document.getElementById('strength-label').textContent = val.length ? labels[score] : '';
+  document.getElementById('strength-label').style.color = colors[score];
+}
+
+async function doLogin() {
+  clearAlert();
+  const email = document.getElementById('login-email').value.trim();
+  const pass = document.getElementById('login-pass').value;
+  if (!email || !pass) { showAlert('Please enter your email and password.', 'error'); return; }
+  setLoading('btn-login', true);
+  try {
+    await window._signInWithEmailAndPassword(window._auth, email, pass);
+    showAlert('Login successful! Redirecting…', 'success');
+    setTimeout(() => { window.location.href = '/'; }, 1000);
+  } catch (err) {
+    showAlert(friendlyError(err.code), 'error');
+  } finally {
+    setLoading('btn-login', false);
+  }
+}
+
+async function doChangePassword() {
+  clearAlert();
+  const email = document.getElementById('change-email').value.trim();
+  const current = document.getElementById('change-current').value;
+  const newPass = document.getElementById('change-new').value;
+  const confirm = document.getElementById('change-confirm').value;
+  if (!email || !current || !newPass || !confirm) { showAlert('Please fill in all fields.', 'error'); return; }
+  if (newPass !== confirm) { showAlert('New passwords do not match.', 'error'); return; }
+  if (newPass.length < 6) { showAlert('New password must be at least 6 characters.', 'error'); return; }
+  setLoading('btn-change', true);
+  try {
+    const userCred = await window._signInWithEmailAndPassword(window._auth, email, current);
+    const credential = window._EmailAuthProvider.credential(email, current);
+    await window._reauthenticateWithCredential(userCred.user, credential);
+    await window._updatePassword(userCred.user, newPass);
+    showAlert('Password updated successfully! You can now log in.', 'success');
+    setTimeout(() => showPanel('panel-login'), 2000);
+  } catch (err) {
+    showAlert(friendlyError(err.code), 'error');
+  } finally {
+    setLoading('btn-change', false);
+  }
+}
+
+async function doSendReset() {
+  clearAlert();
+  const email = document.getElementById('change-email').value.trim();
+  if (!email) { showAlert('Enter your email address above first.', 'error'); return; }
+  try {
+    await window._sendPasswordResetEmail(window._auth, email);
+    showAlert('Reset link sent to ' + email + '. Check your inbox.', 'success');
+  } catch (err) {
+    showAlert(friendlyError(err.code), 'error');
+  }
+}
+
+function friendlyError(code) {
+  const map = {
+    'auth/invalid-email': 'Invalid email address.',
+    'auth/user-not-found': 'No account found with this email.',
+    'auth/wrong-password': 'Incorrect password.',
+    'auth/invalid-credential': 'Invalid email or password.',
+    'auth/too-many-requests': 'Too many attempts. Try again later.',
+    'auth/email-already-in-use': 'Email already in use.',
+    'auth/weak-password': 'Password is too weak (min 6 characters).',
+    'auth/network-request-failed': 'Network error. Check your connection.',
+  };
+  return map[code] || 'Something went wrong. Please try again.';
+}
+
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Enter') return;
+  const active = document.querySelector('.panel.active');
+  if (!active) return;
+  if (active.id === 'panel-login') doLogin();
+  else if (active.id === 'panel-change') doChangePassword();
+});
+</script>
+</body>
+</html>
