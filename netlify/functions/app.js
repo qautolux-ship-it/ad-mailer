@@ -7,13 +7,15 @@ const db = createClient({
   authToken: process.env.TURSO_TOKEN,
 });
 
-// --- Create a fresh transporter per batch — no pool (Netlify is stateless, pool causes zombie connections) ---
 const getTransporter = (s) => nodemailer.createTransport({
   host: s.host,
   port: parseInt(s.port),
   secure: parseInt(s.port) === 465,
   auth: { user: s.user, pass: s.pass },
   tls: { rejectUnauthorized: false },
+  connectionTimeout: 5000,
+  greetingTimeout: 5000,
+  socketTimeout: 8000,
 });
 
 let tablesReady = false;
@@ -32,8 +34,10 @@ async function ensureTables() {
     CREATE INDEX IF NOT EXISTS idx_logs_campaignId ON logs(campaignId);
     CREATE INDEX IF NOT EXISTS idx_logs_status ON logs(status);
     CREATE INDEX IF NOT EXISTS idx_logs_opened ON logs(opened);
+    CREATE INDEX IF NOT EXISTS idx_logs_email ON logs(email);
   `);
   try { await db.execute(`ALTER TABLE campaigns ADD COLUMN templates TEXT`); } catch {}
+  try { await db.execute(`ALTER TABLE smtps ADD COLUMN failStreak INTEGER DEFAULT 0`); } catch {}
   tablesReady = true;
 }
 
@@ -106,8 +110,6 @@ const batchAdd = async (table, rows) => {
   }
 };
 
-// Permissive — only reject blank, missing @, or domain with no dot
-// Accepts plus signs, numbers, dashes, underscores, dots, subdomains, any valid format
 const isValidEmail = (e) => {
   const s = (e || '').trim();
   if (!s || !s.includes('@')) return false;
@@ -120,6 +122,10 @@ const isValidEmail = (e) => {
   if (/\s/.test(s)) return false;
   return true;
 };
+
+// ─── Role email filter — these almost never convert and hurt sender reputation ───
+const isRoleEmail = (email) =>
+  /^(admin|info|noreply|no-reply|support|contact|sales|hello|team|office|webmaster|postmaster|abuse|spam|unsubscribe|bounce|mailer-daemon|hostmaster|security|privacy|billing|help|newsletter|marketing|careers|jobs|press|media|legal|compliance|notifications|alerts|donotreply|do-not-reply)@/i.test(email || '');
 
 const splitCsvLine = (line) => {
   const cols = [];
@@ -153,7 +159,7 @@ const parseCsv = (text) => {
       industry: ii >= 0 ? cols[ii] : '',
       pain_point: pi >= 0 ? cols[pi] : '',
     };
-  }).filter(r => r.email && isValidEmail(r.email));
+  }).filter(r => r.email && isValidEmail(r.email) && !isRoleEmail(r.email));
 };
 
 const personalize = (str, r) => (str || '')
@@ -164,9 +170,6 @@ const personalize = (str, r) => (str || '')
   .replace(/\{\{title\}\}/gi, r.title || '')
   .replace(/\{\{industry\}\}/gi, r.industry || '')
   .replace(/\{\{pain_point\}\}/gi, r.pain_point || '');
-
-// Subject sent exactly as written — no emoji or text appended
-const SV = [s=>s];
 
 const parseBody = async (event) => {
   try {
@@ -223,7 +226,6 @@ const sendViaGmailApi = async (accessToken, fromEmail, toEmail, subject, htmlBod
   return d;
 };
 
-// Strip HTML to plain text for multipart/alternative — required for deliverability
 const htmlToText = (html) => (html || '')
   .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
   .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
@@ -248,6 +250,45 @@ const resetSmtpIfNewDay = async (smtpList) => {
     toReset.forEach(s => { s.sentToday = 0; s.lastReset = today; });
   }
 };
+
+// ─── SMTP failure classifier ───────────────────────────────────────────────
+// Returns 'daily_limit' | 'recipient' | 'smtp_dead'
+const classifySmtpError = (err) => {
+  const msg = (err.message || '').toLowerCase();
+  const code = err.responseCode || 0;
+
+  if (
+    code === 421 || code === 450 || code === 454 ||
+    /daily.*limit|too many messages|rate limit|quota exceeded|exceed.*quota|message.*rate|sending.*limit|5\.4\.5|over.*limit|limit exceeded/i.test(msg)
+  ) return 'daily_limit';
+
+  if (
+    (code >= 550 && code <= 559) ||
+    code === 511 || code === 512 || code === 513 || code === 551 || code === 553 ||
+    /user.*(unknown|not.found|does.not.exist|invalid|no.mailbox)|mailbox.*not.found|address.*invalid|invalid.*address|does not exist|no such user|account.*not.*exist|recipient.*rejected|bad destination/i.test(msg)
+  ) return 'recipient';
+
+  if (
+    err.code === 'ECONNREFUSED' || err.code === 'ETIMEDOUT' ||
+    err.code === 'ENOTFOUND' || err.code === 'EHOSTUNREACH' || err.code === 'ECONNRESET' ||
+    /ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EHOSTUNREACH|ECONNRESET/i.test(msg) ||
+    /authentication|auth failed|login.*fail|535|534|530|username.*password|invalid.*credential|bad.*credential/i.test(msg)
+  ) return 'smtp_dead';
+
+  return 'smtp_dead';
+};
+// ──────────────────────────────────────────────────────────────────────────
+
+// ─── Helper: build IN clause safely for a list of email strings ───────────
+// Returns { clause: 'IN (?,?,?)', args: [...] } or null if list is empty
+const buildInClause = (emails) => {
+  if (!emails || !emails.length) return null;
+  return {
+    clause: 'IN (' + emails.map(() => '?').join(',') + ')',
+    args: emails,
+  };
+};
+// ──────────────────────────────────────────────────────────────────────────
 
 exports.handler = async (event) => {
   await ensureTables();
@@ -284,12 +325,25 @@ exports.handler = async (event) => {
   }
 
   if (action === 'getSmtps') return res(200, await getAll('smtps'));
+
   if (action === 'addSmtp') {
     const { name, host, port, user, pass, from, dailyLimit } = body;
+    if (!name || !host || !user || !pass || !from) return res(400, { error: 'All SMTP fields are required' });
+
+    // ── CHANGE 1: Reject duplicate SMTP — same host + username ──
+    const dupCheck = await queryRows(
+      `SELECT id FROM smtps WHERE host = ? AND user = ? LIMIT 1`,
+      [host.trim().toLowerCase(), user.trim().toLowerCase()]
+    );
+    if (dupCheck.length) {
+      return res(400, { error: 'An SMTP server with this host and username already exists. Duplicate senders are not allowed.' });
+    }
+
     const today = new Date().toISOString().slice(0, 10);
     const id = await addItem('smtps', { name, host, port, user, pass, from, dailyLimit: dailyLimit || '', sentToday: 0, lastReset: today });
     return res(200, { id });
   }
+
   if (action === 'deleteSmtp') {
     await deleteItem('smtps', body.id);
     return res(200, { ok: true });
@@ -300,6 +354,16 @@ exports.handler = async (event) => {
   if (action === 'addGmail') {
     const { name, clientId, clientSecret, refreshToken, fromEmail, dailyLimit } = body;
     if (!clientId || !clientSecret || !refreshToken || !fromEmail) return res(400, { error: 'Missing required fields' });
+
+    // ── CHANGE 1b: Reject duplicate Gmail account — same fromEmail ──
+    const gmailDupCheck = await queryRows(
+      `SELECT id FROM gmail_accounts WHERE fromEmail = ? LIMIT 1`,
+      [fromEmail.trim().toLowerCase()]
+    );
+    if (gmailDupCheck.length) {
+      return res(400, { error: 'A Gmail account with this email address already exists. Duplicate senders are not allowed.' });
+    }
+
     try {
       await getGmailAccessToken(clientId, clientSecret, refreshToken);
     } catch(e) {
@@ -347,7 +411,7 @@ exports.handler = async (event) => {
     const list = await getAll('smtps');
     const s = list.find(x => x.id === body.id);
     if (!s) return res(404, { ok: false });
-    const t = nodemailer.createTransport({ host: s.host, port: parseInt(s.port), secure: parseInt(s.port) === 465, auth: { user: s.user, pass: s.pass }, tls: { rejectUnauthorized: false } });
+    const t = nodemailer.createTransport({ host: s.host, port: parseInt(s.port), secure: parseInt(s.port) === 465, auth: { user: s.user, pass: s.pass }, tls: { rejectUnauthorized: false }, connectionTimeout: 5000, greetingTimeout: 5000, socketTimeout: 8000 });
     try {
       await t.verify();
       t.close();
@@ -394,7 +458,8 @@ exports.handler = async (event) => {
     if (!csv || !listName) return res(400, { error: 'Missing csv or listName' });
     const parsed = parseCsv(csv);
     if (!parsed.length) return res(400, { error: 'No valid emails found in file.' });
-    // Deduplicate within the uploaded file by email only
+
+    // Deduplicate within the uploaded file itself
     const seen = new Set();
     const unique = parsed.filter(r => {
       if (!r.email) return false;
@@ -402,22 +467,79 @@ exports.handler = async (event) => {
       seen.add(r.email);
       return true;
     });
-    const dupes = parsed.length - unique.length;
+    const dupesInFile = parsed.length - unique.length;
+
+    // ── CHANGE 2: Strict global deduplication — check against ALL existing contacts ──
+    // We check in chunks of 200 to avoid hitting SQLite parameter limits
+    const CHUNK = 200;
+    const globalExistingSet = new Set();
+    for (let i = 0; i < unique.length; i += CHUNK) {
+      const chunk = unique.slice(i, i + CHUNK).map(r => r.email);
+      const inClause = buildInClause(chunk);
+      if (!inClause) continue;
+      const existing = await queryRows(
+        `SELECT DISTINCT email FROM contacts WHERE email ${inClause.clause}`,
+        inClause.args
+      );
+      existing.forEach(e => { if (e.email) globalExistingSet.add(e.email.toLowerCase()); });
+    }
+
+    // Also check against unsubscribed and bounced — no point importing them
+    const unsubSet = new Set();
+    const bouncedSet = new Set();
+    for (let i = 0; i < unique.length; i += CHUNK) {
+      const chunk = unique.slice(i, i + CHUNK).map(r => r.email);
+      const inClause = buildInClause(chunk);
+      if (!inClause) continue;
+      const [unsubRows, bouncedRows] = await Promise.all([
+        queryRows(`SELECT email FROM unsubscribed WHERE email ${inClause.clause}`, inClause.args),
+        queryRows(`SELECT email FROM bounced WHERE email ${inClause.clause}`, inClause.args),
+      ]);
+      unsubRows.forEach(e => { if (e.email) unsubSet.add(e.email.toLowerCase()); });
+      bouncedRows.forEach(e => { if (e.email) bouncedSet.add(e.email.toLowerCase()); });
+    }
+
+    const toInsert = unique.filter(r =>
+      !globalExistingSet.has(r.email) &&
+      !unsubSet.has(r.email) &&
+      !bouncedSet.has(r.email)
+    );
+
+    const totalSkipped = (parsed.length - unique.length) + (unique.length - toInsert.length);
+
     const listId = await addItem('lists', { name: listName });
-    // Check which emails already exist in DB to avoid double-insert
-    const existing = await queryRows(`SELECT email FROM contacts WHERE listId = ?`, [listId]);
-    const existingSet = new Set(existing.map(e => e.email));
-    const toInsert = unique.filter(r => !existingSet.has(r.email));
     if (toInsert.length) await batchAdd('contacts', toInsert.map(r => ({ ...r, listId })));
-    return res(200, { count: toInsert.length, dupes, listId });
+
+    return res(200, {
+      count: toInsert.length,
+      dupes: dupesInFile,
+      skippedGlobal: unique.length - toInsert.length,
+      listId,
+    });
   }
 
   if (action === 'addContact') {
     const { listId, email, name, company, title, industry, pain_point } = body;
     if (!email || !isValidEmail(email)) return res(400, { error: 'Invalid email address' });
-    const existing = await queryRows('SELECT id FROM contacts WHERE listId = ? AND email = ? LIMIT 1', [listId, email.toLowerCase()]);
-    if (existing.length) return res(400, { error: 'Email already exists in this list' });
-    const id = await addItem('contacts', { listId, email: email.toLowerCase(), name: name || '', company: company || '', title: title || '', industry: industry || '', pain_point: pain_point || '' });
+
+    const cleanEmail = email.trim().toLowerCase();
+
+    // ── CHANGE 2b: Role email blocked on manual add too ──
+    if (isRoleEmail(cleanEmail)) return res(400, { error: 'Role-based email addresses (admin@, info@, noreply@ etc.) are not allowed — they hurt sender reputation.' });
+
+    // Check unsubscribed
+    const unsubCheck = await queryRows('SELECT id FROM unsubscribed WHERE email = ? LIMIT 1', [cleanEmail]);
+    if (unsubCheck.length) return res(400, { error: 'This email has unsubscribed and cannot be re-added.' });
+
+    // Check bounced
+    const bouncedCheck = await queryRows('SELECT id FROM bounced WHERE email = ? LIMIT 1', [cleanEmail]);
+    if (bouncedCheck.length) return res(400, { error: 'This email has bounced and cannot be re-added.' });
+
+    // Check global duplicate across all contacts (not just this list)
+    const globalDup = await queryRows('SELECT id FROM contacts WHERE email = ? LIMIT 1', [cleanEmail]);
+    if (globalDup.length) return res(400, { error: 'This email already exists in your contacts.' });
+
+    const id = await addItem('contacts', { listId, email: cleanEmail, name: name || '', company: company || '', title: title || '', industry: industry || '', pain_point: pain_point || '' });
     return res(200, { id });
   }
 
@@ -605,7 +727,7 @@ exports.handler = async (event) => {
     const targets = smtpList.filter(s => smtpIds.includes(s.id));
     const results = [];
     for (const smtp of targets) {
-      const t = nodemailer.createTransport({ host: smtp.host, port: parseInt(smtp.port), secure: parseInt(smtp.port) === 465, auth: { user: smtp.user, pass: smtp.pass }, tls: { rejectUnauthorized: false } });
+      const t = nodemailer.createTransport({ host: smtp.host, port: parseInt(smtp.port), secure: parseInt(smtp.port) === 465, auth: { user: smtp.user, pass: smtp.pass }, tls: { rejectUnauthorized: false }, connectionTimeout: 5000, greetingTimeout: 5000, socketTimeout: 8000 });
       let sent = 0;
       const warmupCount = 3 + Math.floor(Math.random() * 5);
       for (let i = 0; i < warmupCount; i++) {
@@ -633,7 +755,10 @@ exports.handler = async (event) => {
     if (!queued) return res(404, { error: 'Campaign not found' });
     if (queued.status === 'paused') return res(200, { done: false, sent: queued.sent || 0, failed: queued.failed || 0, paused: true });
     if (queued.status === 'done') return res(200, { done: true, sent: queued.sent || 0, failed: queued.failed || 0 });
-    if (queued.status === 'running') { await db.execute({ sql: `UPDATE campaigns SET status='queued' WHERE id=? AND status='running'`, args: [campaignId] }); return res(200, { done: false, sent: queued.sent || 0, failed: queued.failed || 0, busy: true }); }
+    if (queued.status === 'running') {
+      await db.execute({ sql: `UPDATE campaigns SET status='queued' WHERE id=? AND status='running'`, args: [campaignId] });
+      return res(200, { done: false, sent: queued.sent || 0, failed: queued.failed || 0, busy: true });
+    }
 
     const currentOffset = queued.offset || 0;
     const total = queued.total || 0;
@@ -664,7 +789,6 @@ exports.handler = async (event) => {
       return res(400, { error: 'No SMTP servers or Gmail accounts' });
     }
 
-    // Reset daily counters using ISO date (UTC-consistent, no timezone drift)
     const todayStr = new Date().toISOString().slice(0, 10);
     const gmailToReset = gmailList.filter(g => g.lastReset !== todayStr);
     if (gmailToReset.length) {
@@ -687,26 +811,53 @@ exports.handler = async (event) => {
       `SELECT * FROM contacts WHERE listId = ? ORDER BY createdAt ASC LIMIT ? OFFSET ?`,
       [queued.listId, BATCH_SIZE, offset]
     );
-    const batch = rawContacts.filter(r => r.email && isValidEmail(r.email) && !unsubEmails.has(r.email.toLowerCase()) && !bouncedEmails.has(r.email.toLowerCase()));
+
+    // Base filter: valid email, not unsubscribed, not bounced
+    const preFiltered = rawContacts.filter(r =>
+      r.email && isValidEmail(r.email) &&
+      !unsubEmails.has(r.email.toLowerCase()) &&
+      !bouncedEmails.has(r.email.toLowerCase())
+    );
+
+    // ── CHANGE 3: Never send to same email twice globally ──
+    // Check which emails in this batch have already been successfully sent to
+    let batch = preFiltered;
+    if (preFiltered.length > 0) {
+      const batchEmails = preFiltered.map(r => r.email.toLowerCase());
+      const inClause = buildInClause(batchEmails);
+      if (inClause) {
+        const alreadySentRows = await queryRows(
+          `SELECT DISTINCT email FROM logs WHERE status = 'sent' AND email ${inClause.clause}`,
+          inClause.args
+        );
+        const alreadySentSet = new Set(alreadySentRows.map(r => r.email && r.email.toLowerCase()).filter(Boolean));
+        batch = preFiltered.filter(r => !alreadySentSet.has(r.email.toLowerCase()));
+      }
+    }
 
     const tplList = Array.isArray(queued.templates) && queued.templates.length > 0 ? queued.templates : [{ subject: queued.subject, html: queued.html }];
 
-    // Create fresh transporters per batch — closed explicitly after sending to prevent zombie connections
     const transporters = smtpList.map(s => ({
-      ...s, limit: parseInt(s.dailyLimit) || 999999, used: parseInt(s.sentToday) || 0, type: 'smtp',
-      t: getTransporter(s),
+      ...s,
+      limit: parseInt(s.dailyLimit) || 999999,
+      used: parseInt(s.sentToday) || 0,
+      type: 'smtp',
+      failStreak: parseInt(s.failStreak) || 0,
       blockCounts: {},
+      t: getTransporter(s),
     }));
 
     const gmailTransporters = gmailList.map(g => ({
-      ...g, limit: parseInt(g.dailyLimit) || 500, used: parseInt(g.sentToday) || 0, type: 'gmail',
+      ...g,
+      limit: parseInt(g.dailyLimit) || 500,
+      used: parseInt(g.sentToday) || 0,
+      type: 'gmail',
       blockCounts: {},
     }));
+
     const allTransporters = [...transporters, ...gmailTransporters];
 
     const BLOCK_LIMIT = 2;
-    // 421 and 450 are soft/tempfail codes (greylisting, rate limit) — NOT permanent blocks
-    // Only treat 550/554 and message-text patterns as actual blocks
     const isBlockError = (err) =>
       err.responseCode === 550 || err.responseCode === 554 ||
       /block|spam|blacklist|reject|denylist|policy violation|not accept/i.test(err.message || '');
@@ -718,6 +869,7 @@ exports.handler = async (event) => {
     let batchSent = 0, batchFailed = 0;
     const abVariant = queued.abTest ? (Math.floor(offset / BATCH_SIZE) % 2) : null;
     const smtpSentCounts = {}, gmailSentCounts = {}, gmailTokenCache = {};
+    const autoDeletedSmtps = [];
 
     for (let i = 0; i < batch.length; i++) {
       const r = batch[i];
@@ -727,6 +879,7 @@ exports.handler = async (event) => {
 
       const recipDomain = (r.email || '').split('@')[1]?.toLowerCase().trim() || '';
       const domainSensitive = isDomainSensitive(recipDomain);
+
       let current = null;
       for (let j = 0; j < allTransporters.length; j++) {
         const c = allTransporters[(tIdx + j) % allTransporters.length];
@@ -756,18 +909,16 @@ exports.handler = async (event) => {
       emailBody += '<img src="' + trackOpen + '" width="1" height="1" alt="" style="width:1px;height:1px;border:0;margin:0;padding:0">';
 
       const plainText = htmlToText(emailBody) + '\n\nTo unsubscribe: ' + unsub;
-
       const delayMs = queued.randomizeDelay ? Math.floor(Math.random() * (parseInt(queued.delay) || 200) * 2) : (parseInt(queued.delay) || 0);
 
       try {
         if (delayMs > 0) await new Promise(resolve => setTimeout(resolve, delayMs));
+
         if (current.type === 'gmail') {
-          // Fetch token once per Gmail account per batch, with fallback on failure
           if (!gmailTokenCache[current.id]) {
             try {
               gmailTokenCache[current.id] = await getGmailAccessToken(current.clientId, current.clientSecret, current.refreshToken);
             } catch (tokenErr) {
-              // Mark this account as exhausted so we skip it for the rest of the batch
               current.used = current.limit;
               batchFailed++;
               batchLogs.push({ id: uuid(), email: r.email, smtp: current.name, smtpId: current.id, status: 'failed', error: 'Gmail token error: ' + tokenErr.message, ts: new Date().toISOString(), campaignId: queued.id, campaign: queued.name, subject: queued.subject });
@@ -779,35 +930,82 @@ exports.handler = async (event) => {
         } else {
           await current.t.sendMail({
             from: '"' + finalFromName + '" <' + current.from + '>',
-            to: r.email, subject: finalSubject,
+            to: r.email,
+            subject: finalSubject,
             text: plainText,
             html: emailBody,
             headers: {
               'List-Unsubscribe': '<' + unsub + '>',
               'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
-              // Removed: 'X-Mailer' and 'Precedence: bulk' — both flag as bulk/spam
             },
           });
           smtpSentCounts[current.id] = (smtpSentCounts[current.id] || 0) + 1;
         }
+
+        if (current.type === 'smtp' && current.failStreak > 0) {
+          current.failStreak = 0;
+          try { await db.execute({ sql: `UPDATE smtps SET failStreak = 0 WHERE id = ?`, args: [current.id] }); } catch {}
+        } else if (current.type === 'smtp') {
+          current.failStreak = 0;
+        }
         current.used++;
         batchSent++;
         batchLogs.push({ id: logId, email: r.email, smtp: current.name, smtpId: current.id, status: 'sent', opened: 0, clicked: 0, ts: new Date().toISOString(), campaignId: queued.id, campaign: queued.name, subject: queued.subject, abVariant: abVariant !== null ? abVariant : -1 });
+
       } catch (err) {
         batchFailed++;
+
+        if (current.type === 'gmail') {
+          const isGmailDailyLimit = /user rate limit|rateLimitExceeded|daily limit|quota exceeded|exceeded.*quota|sending limit|5\.4\.5|too many messages|message rate|over.*limit|limit exceeded/i.test(err.message || '') || err.responseCode === 421 || err.responseCode === 450;
+          if (isGmailDailyLimit) {
+            autoDeletedSmtps.push(current.name || current.id);
+            try { await db.execute({ sql: `DELETE FROM gmail_accounts WHERE id = ?`, args: [current.id] }); } catch {}
+            gmailSentCounts[current.id] = 0;
+            const idx = allTransporters.indexOf(current);
+            if (idx !== -1) allTransporters.splice(idx, 1);
+            if (allTransporters.length > 0) { tIdx = tIdx % allTransporters.length; } else { tIdx = 0; }
+          }
+        } else {
+          const errType = classifySmtpError(err);
+
+          if (errType === 'daily_limit') {
+            autoDeletedSmtps.push(current.name || current.id);
+            try { await db.execute({ sql: `DELETE FROM smtps WHERE id = ?`, args: [current.id] }); } catch {}
+            delete smtpSentCounts[current.id];
+            const dlIdx = allTransporters.indexOf(current);
+            if (dlIdx !== -1) allTransporters.splice(dlIdx, 1);
+            if (allTransporters.length > 0) { tIdx = tIdx % allTransporters.length; } else { tIdx = 0; }
+
+          } else if (errType === 'smtp_dead') {
+            current.failStreak = (current.failStreak || 0) + 1;
+            try { await db.execute({ sql: `UPDATE smtps SET failStreak = ? WHERE id = ?`, args: [current.failStreak, current.id] }); } catch {}
+
+            if (current.failStreak >= 2) {
+              autoDeletedSmtps.push(current.name || current.id);
+              delete smtpSentCounts[current.id];
+              try { await db.execute({ sql: `DELETE FROM smtps WHERE id = ?`, args: [current.id] }); } catch {}
+              const idx = allTransporters.indexOf(current);
+              if (idx !== -1) allTransporters.splice(idx, 1);
+              if (allTransporters.length > 0) { tIdx = tIdx % allTransporters.length; } else { tIdx = 0; }
+            }
+          }
+          // errType === 'recipient' — not the SMTP's fault, leave failStreak untouched
+        }
+
         if (domainSensitive && isBlockError(err)) {
           current.blockCounts[recipDomain] = (current.blockCounts[recipDomain] || 0) + 1;
         }
+
         const hardBounce =
           (err.responseCode >= 550 && err.responseCode <= 559) ||
           err.responseCode === 511 || err.responseCode === 512 || err.responseCode === 513 || err.responseCode === 551 || err.responseCode === 553 ||
           /5\.[123]\.[012]|user.*(unknown|not.found|does.not.exist|invalid|no.mailbox)|mailbox.*not.found|address.*invalid|invalid.*address|does not exist|no such user|account.*not.*exist|recipient.*rejected|bad destination/i.test(err.message || '');
         if (hardBounce) newBounced.push(r.email.toLowerCase());
+
         batchLogs.push({ id: uuid(), email: r.email, smtp: current.name, smtpId: current.id, status: 'failed', error: err.message, bounce: hardBounce ? 1 : 0, ts: new Date().toISOString(), campaignId: queued.id, campaign: queued.name, subject: queued.subject });
       }
     }
 
-    // Close all SMTP transporters cleanly — prevents zombie connections on Netlify
     for (const t of transporters) {
       if (t.t) { try { t.t.close(); } catch {} }
     }
@@ -816,7 +1014,7 @@ exports.handler = async (event) => {
       await db.execute({ sql: `UPDATE smtps SET sentToday = sentToday + ? WHERE id = ?`, args: [count, smtpId] });
     }
     for (const [gmailId, count] of Object.entries(gmailSentCounts)) {
-      await db.execute({ sql: `UPDATE gmail_accounts SET sentToday = sentToday + ? WHERE id = ?`, args: [count, gmailId] });
+      if (count > 0) await db.execute({ sql: `UPDATE gmail_accounts SET sentToday = sentToday + ? WHERE id = ?`, args: [count, gmailId] });
     }
 
     const newOffset = offset + BATCH_SIZE;
@@ -830,7 +1028,7 @@ exports.handler = async (event) => {
     if (newBounced.length) await batchAdd('bounced', newBounced.map(email => ({ email, bounceType: 'hard' })));
     if (batchLogs.length) await batchAdd('logs', batchLogs);
 
-    return res(200, { done, sent: totalSent, failed: totalFailed });
+    return res(200, { done, sent: totalSent, failed: totalFailed, autoDeletedSmtps });
   }
 
   return res(404, { error: 'Unknown action: ' + action });
