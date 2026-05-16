@@ -705,6 +705,7 @@ body.light .logo-name { color:#0f172a; }
         </div>
       </div>
 
+      <div id="send-removed-banner" style="display:none;background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.25);border-radius:8px;padding:10px 14px;margin-bottom:12px;font-size:12px;color:var(--red);font-weight:600"></div>
       <div id="send-paused-banner" style="display:none;background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.25);border-radius:8px;padding:10px 14px;margin-bottom:12px;font-size:12px;color:var(--yellow);text-align:center;font-weight:600">⏸ Paused — click Resume to continue sending</div>
       <div id="send-network-banner" style="display:none;background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.25);border-radius:8px;padding:10px 14px;margin-bottom:12px;font-size:12px;color:var(--red);text-align:center;font-weight:600">⚠ Network error — retrying automatically...</div>
 
@@ -758,6 +759,7 @@ body.light .logo-name { color:#0f172a; }
   <div style="height:4px;background:rgba(255,255,255,0.06);border-radius:2px;overflow:hidden">
     <div id="mini-bar" style="height:100%;background:linear-gradient(90deg,var(--primary),var(--primary-light));border-radius:2px;width:0%;transition:width .4s ease"></div>
   </div>
+  <div id="mini-removed-banner" style="display:none;background:rgba(239,68,68,0.15);border:1px solid rgba(239,68,68,0.4);border-radius:6px;padding:5px 8px;margin-top:7px;font-size:10px;color:#f87171;font-weight:600;text-align:center"></div>
   <div style="font-size:10px;color:var(--muted2);margin-top:6px;text-align:center">Click to expand · ⊟ minimized</div>
 </div>
 
@@ -914,7 +916,7 @@ function goTo(page) {
   document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
   document.querySelector('[data-page="'+page+'"]').classList.add('active');
   document.getElementById('page-'+page).classList.add('active');
-  if (page==='smtp') loadSmtps();
+  if (page==='smtp') { loadSmtps(); loadGmailStatus(); }
   if (page==='contacts') loadLists();
   if (page==='campaigns') { loadSmtpPool(); loadCampaignLists(); loadPastCampaigns(); }
   if (page==='logs') loadLogs();
@@ -1017,7 +1019,7 @@ function loadSmtps() {
 document.getElementById('smtp-form').addEventListener('submit', function(e) {
   e.preventDefault();
   const data = { name:V('s-name'), host:V('s-host'), port:V('s-port'), user:V('s-user'), pass:V('s-pass'), from:V('s-from'), dailyLimit:V('s-limit') };
-  post('addSmtp', data).then(()=>{ toast('SMTP server added!','success'); loadSmtps(); });
+  post('addSmtp', data).then(()=>{ toast('SMTP server added!','success'); this.reset(); loadSmtps(); });
 });
 
 function testSmtp(id, btn) {
@@ -1028,7 +1030,7 @@ function testSmtp(id, btn) {
       : '<span class="badge b-red">✕ Failed</span>';
     btn.textContent='Test'; btn.disabled=false;
     toast(d.ok?'SMTP connection successful!':'SMTP connection failed: '+d.error, d.ok?'success':'error');
-  });
+  }).catch(()=>{ btn.textContent='Test'; btn.disabled=false; toast('Test request failed — check network','error'); });
 }
 
 function deleteSmtp(id) {
@@ -1088,7 +1090,7 @@ document.getElementById('csv-file').addEventListener('change', function() {
   reader.onload=e=>{
     post('uploadCsv',{csv:e.target.result,listName}).then(d=>{
       if(d.error){m.style.color='var(--red)';m.textContent='✕ '+d.error;toast(d.error,'error');return;}
-      m.textContent='✓ Imported '+d.count.toLocaleString()+' contacts'+(d.duplicatesRemoved>0?' ('+d.duplicatesRemoved+' duplicates removed)':'');
+      m.textContent='✓ Imported '+d.count.toLocaleString()+' contacts'+(d.dupes>0?' ('+d.dupes+' duplicates removed)':'');
       document.getElementById('list-name-inp').value='';
       toast('Imported '+d.count.toLocaleString()+' contacts successfully','success');
       loadLists();
@@ -1256,6 +1258,18 @@ document.getElementById('campaign-form').addEventListener('submit', async functi
     if (r.busy) { await new Promise(res=>setTimeout(res,2000)); continue; }
     if (r.error) { toast(r.error,'error'); break; }
 
+    if (r.autoDeletedSmtps && r.autoDeletedSmtps.length) {
+      r.autoDeletedSmtps.forEach(name => {
+        toast('⚠ SMTP "' + name + '" auto-removed after 2 consecutive failures', 'error');
+      });
+      const msg = '⚠ Removed: ' + r.autoDeletedSmtps.join(', ');
+      const ob = document.getElementById('send-removed-banner');
+      const mb = document.getElementById('mini-removed-banner');
+      if (ob) { ob.textContent = msg; ob.style.display = 'block'; }
+      if (mb) { mb.textContent = msg; mb.style.display = 'block'; }
+      loadSmtpPool();
+    }
+
     done=r.done||false;
     sent=r.sent||0; failed=r.failed||0;
     const pct=total>0?Math.round((sent+failed)/total*100):0;
@@ -1299,6 +1313,8 @@ function openSendOverlay(name,total,skipped) {
   document.getElementById('send-mini').style.display='none';
   document.getElementById('send-paused-banner').style.display='none';
   document.getElementById('send-network-banner').style.display='none';
+  const _orb=document.getElementById('send-removed-banner'); if(_orb){_orb.style.display='none';_orb.textContent='';}
+  const _omb=document.getElementById('mini-removed-banner'); if(_omb){_omb.style.display='none';_omb.textContent='';}
   document.getElementById('send-pause-btn').textContent='⏸ Pause';
   window._sendPaused=false;
   window._sendStartTime=Date.now();
@@ -1446,6 +1462,19 @@ function resumeCampaign(btn) {
         if (r.error) { toast(r.error,'error'); break; }
         done = r.done;
         const s=r.sent||0, f=r.failed||0, t=total||s+f;
+
+        if (r.autoDeletedSmtps && r.autoDeletedSmtps.length) {
+          r.autoDeletedSmtps.forEach(name => {
+            toast('⚠ SMTP "' + name + '" auto-removed after 2 consecutive failures', 'error');
+          });
+          const msg = '⚠ Removed: ' + r.autoDeletedSmtps.join(', ');
+          const ob = document.getElementById('send-removed-banner');
+          const mb = document.getElementById('mini-removed-banner');
+          if (ob) { ob.textContent = msg; ob.style.display = 'block'; }
+          if (mb) { mb.textContent = msg; mb.style.display = 'block'; }
+          loadSmtpPool();
+        }
+
         const elapsed=(Date.now()-startTime)/1000;
         const pct=t>0?Math.round((s+f)/t*100):0;
         const speed=elapsed>0?Math.round((s+f)/elapsed*10)/10:0;
@@ -1711,10 +1740,16 @@ async function runWarmup() {
   if (emailPairs.length < 2) { toast('Enter at least 2 email addresses','error'); return; }
   const r = document.getElementById('warmup-result');
   r.style.display='block'; r.style.color='var(--muted)'; r.textContent='Running warm-up... this may take a few minutes';
-  const data = await post('warmup', { smtpIds, emailPairs });
-  r.style.color='var(--green)';
-  r.textContent = data.results.map(x=>`${x.smtp}: ${x.sent} warm-up emails sent`).join(' · ');
-  toast('Warm-up round complete','success');
+  try {
+    const data = await post('warmup', { smtpIds, emailPairs });
+    if (data.error) { r.style.color='var(--red)'; r.textContent='✕ Warm-up failed: '+data.error; toast('Warm-up failed: '+data.error,'error'); return; }
+    r.style.color='var(--green)';
+    r.textContent = data.results.map(x=>`${x.smtp}: ${x.sent} warm-up emails sent`).join(' · ');
+    toast('Warm-up round complete','success');
+  } catch(e) {
+    r.style.color='var(--red)'; r.textContent='✕ Warm-up request failed — check network';
+    toast('Warm-up request failed','error');
+  }
 }
 
 function openAiModal() { document.getElementById('ai-modal').style.display='flex'; }
@@ -1976,7 +2011,7 @@ function toggleEye(inputId, el) {
 }
 
 function showSenderTab(tab) {
-  const smtpPanel = document.querySelector('#page-smtp > div:nth-child(2)');
+  const smtpPanel = document.getElementById('smtp-panel');
   const gmailPanel = document.getElementById('gmail-panel');
   const smtpBtn = document.getElementById('tab-smtp-btn');
   const gmailBtn = document.getElementById('tab-gmail-btn');
@@ -2032,7 +2067,7 @@ function testGmail(id, btn) {
     btn.style.color = d.ok ? 'var(--green)' : 'var(--red)';
     btn.disabled = false;
     if (!d.ok && d.error) toast('Error: ' + d.error, 'error');
-  });
+  }).catch(()=>{ btn.textContent = 'Test'; btn.disabled = false; toast('Test request failed — check network','error'); });
 }
 
 function deleteGmail(id) {
