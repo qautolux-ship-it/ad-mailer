@@ -51,7 +51,7 @@ const personalize = (str, r) => (str || '')
   .replace(/\{\{industry\}\}/gi, r.industry || '')
   .replace(/\{\{pain_point\}\}/gi, r.pain_point || '');
 
-const SV = [s=>s, s=>s+' 🔥', s=>s+' ✨', s=>'👋 '+s, s=>s+' — Limited Time'];
+const SV = [s=>s, s=>s+' ðŸ”¥', s=>s+' âœ¨', s=>'ðŸ‘‹ '+s, s=>s+' â€” Limited Time'];
 const FS = ['', ' Team', ' HQ', ' Pro', ' Labs'];
 const BATCH_SIZE = 50;
 
@@ -91,6 +91,38 @@ const sendViaGmailApi = async (accessToken, fromEmail, toEmail, subject, htmlBod
   if (d.error) throw new Error(d.error.message || 'Gmail API error');
   return d;
 };
+
+// â”€â”€â”€ SMTP failure classifier â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Returns 'daily_limit' | 'recipient' | 'smtp_dead'
+const classifySmtpError = (err) => {
+  const msg = (err.message || '').toLowerCase();
+  const code = err.responseCode || 0;
+
+  // Daily / rate limit â€” SMTP is fine, just exhausted for today
+  if (
+    code === 421 || code === 450 || code === 454 ||
+    /daily.*limit|too many messages|rate limit|quota exceeded|exceed.*quota|message.*rate|sending.*limit/i.test(msg)
+  ) return 'daily_limit';
+
+  // Recipient-level errors â€” not the SMTP's fault
+  if (
+    (code >= 550 && code <= 559) ||
+    code === 511 || code === 512 || code === 513 || code === 551 || code === 553 ||
+    /user.*(unknown|not.found|does.not.exist|invalid|no.mailbox)|mailbox.*not.found|address.*invalid|invalid.*address|does not exist|no such user|account.*not.*exist|recipient.*rejected|bad destination/i.test(msg)
+  ) return 'recipient';
+
+  // Real SMTP dead â€” auth, connection, TLS, DNS
+  if (
+    err.code === 'ECONNREFUSED' || err.code === 'ETIMEDOUT' ||
+    err.code === 'ENOTFOUND' || err.code === 'EHOSTUNREACH' || err.code === 'ECONNRESET' ||
+    /ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EHOSTUNREACH|ECONNRESET/i.test(msg) ||
+    /authentication|auth failed|login.*fail|535|534|530|username.*password|invalid.*credential|bad.*credential/i.test(msg)
+  ) return 'smtp_dead';
+
+  // Default: treat unknown errors as smtp_dead to be safe
+  return 'smtp_dead';
+};
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export default async function handler() {
   try {
@@ -162,9 +194,20 @@ export default async function handler() {
 
     const tplList = Array.isArray(queued.templates) && queued.templates.length > 0 ? queued.templates : [{ subject: queued.subject, html: queued.html }];
 
+    // Build transporters â€” each SMTP gets a failStreak counter starting at 0
     const transporters = smtpList.map(s => ({
-      ...s, limit: parseInt(s.dailyLimit) || 999999, used: parseInt(s.sentToday) || 0, type: 'smtp',
-      t: nodemailer.createTransport({ host: s.host, port: parseInt(s.port), secure: parseInt(s.port) === 465, auth: { user: s.user, pass: s.pass }, tls: { rejectUnauthorized: false } }),
+      ...s,
+      limit: parseInt(s.dailyLimit) || 999999,
+      used: parseInt(s.sentToday) || 0,
+      type: 'smtp',
+      failStreak: 0,
+      t: nodemailer.createTransport({
+        host: s.host,
+        port: parseInt(s.port),
+        secure: parseInt(s.port) === 465,
+        auth: { user: s.user, pass: s.pass },
+        tls: { rejectUnauthorized: false },
+      }),
     }));
 
     const gmailTransporters = gmailList.map(g => ({
@@ -174,6 +217,8 @@ export default async function handler() {
     const allTransporters = [...transporters, ...gmailTransporters];
     const gmailTokenCache = {};
     const smtpSentCounts = {}, gmailSentCounts = {};
+    // Track which SMTPs were auto-deleted this batch (for logging)
+    const autoDeletedSmtps = [];
 
     let tIdx = queued.smtpIndex || 0;
     const logs = [], newBounced = [];
@@ -187,6 +232,7 @@ export default async function handler() {
       const recipSubject = tpl.subject || queued.subject;
       const recipHtml = tpl.html || queued.html;
 
+      // Pick next available transporter
       let current = null;
       for (let j = 0; j < allTransporters.length; j++) {
         const c = allTransporters[(tIdx + j) % allTransporters.length];
@@ -226,22 +272,76 @@ export default async function handler() {
         } else {
           await current.t.sendMail({
             from: `"${finalFromName}" <${current.from}>`, to: r.email, subject: finalSubject, html: body,
-            headers: { 'List-Unsubscribe': baseUrl ? `<${baseUrl}/api/app?action=unsub&email=${encodeURIComponent(r.email)}>` : '', 'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click', 'X-Mailer': 'CentMailer-Pro', 'Precedence': 'bulk' },
+            headers: {
+              'List-Unsubscribe': baseUrl ? `<${baseUrl}/api/app?action=unsub&email=${encodeURIComponent(r.email)}>` : '',
+              'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+              'X-Mailer': 'CentMailer-Pro',
+              'Precedence': 'bulk',
+            },
           });
           smtpSentCounts[current.id] = (smtpSentCounts[current.id] || 0) + 1;
         }
 
+        // âœ… Success â€” reset failStreak for SMTP senders
+        if (current.type === 'smtp') current.failStreak = 0;
         current.used++;
         batchSent++;
         logs.push({ id: logId, email: r.email, smtp: current.name, smtpId: current.id, status: 'sent', opened: 0, clicked: 0, ts: new Date().toISOString(), campaignId: queued.id, campaign: queued.name, subject: queued.subject, abVariant: abVariant !== null ? abVariant : -1 });
+
       } catch (err) {
         batchFailed++;
+
+        // Classify the error
+        const errType = current.type === 'smtp' ? classifySmtpError(err) : 'recipient';
+
+        if (errType === 'daily_limit') {
+          // SMTP hit its daily cap â€” exhaust it for this batch, never delete
+          current.used = current.limit;
+
+        } else if (errType === 'smtp_dead' && current.type === 'smtp') {
+          // Real SMTP failure â€” increment streak
+          current.failStreak = (current.failStreak || 0) + 1;
+
+          if (current.failStreak >= 2) {
+            // âŒ Two consecutive real failures â€” auto-delete this SMTP
+            console.log(`[AutoDelete] SMTP "${current.name}" (${current.id}) removed after 2 consecutive failures. Last error: ${err.message}`);
+            autoDeletedSmtps.push(current.name || current.id);
+
+            // Flush any partial sent count before removing
+            const partialCount = smtpSentCounts[current.id] || 0;
+            if (partialCount > 0) {
+              try {
+                await db.execute({ sql: `UPDATE smtps SET sentToday = sentToday + ? WHERE id = ?`, args: [partialCount, current.id] });
+              } catch {}
+              delete smtpSentCounts[current.id];
+            }
+
+            // Delete from DB
+            try { await db.execute({ sql: `DELETE FROM smtps WHERE id = ?`, args: [current.id] }); } catch {}
+
+            // Remove from active pool
+            const idx = allTransporters.indexOf(current);
+            if (idx !== -1) allTransporters.splice(idx, 1);
+
+            // Fix tIdx so it doesn't go out of bounds
+            if (allTransporters.length > 0) {
+              tIdx = tIdx % allTransporters.length;
+            } else {
+              tIdx = 0;
+            }
+          }
+        }
+        // If errType === 'recipient' â€” not the SMTP's fault, leave failStreak untouched
+
+        // Hard bounce detection (recipient error)
         const hardBounce = (err.responseCode >= 550 && err.responseCode < 560) || /user.*(unknown|not.found|does.not.exist)/i.test(err.message || '');
         if (hardBounce) newBounced.push(r.email.toLowerCase());
+
         logs.push({ id: uuid(), email: r.email, smtp: current.name, smtpId: current.id, status: 'failed', error: err.message, bounce: hardBounce ? 1 : 0, ts: new Date().toISOString(), campaignId: queued.id, campaign: queued.name, subject: queued.subject });
       }
     }
 
+    // Flush sentToday counts for remaining (non-deleted) SMTPs
     for (const [smtpId, count] of Object.entries(smtpSentCounts)) {
       await db.execute({ sql: `UPDATE smtps SET sentToday = sentToday + ? WHERE id = ?`, args: [count, smtpId] });
     }
@@ -257,6 +357,11 @@ export default async function handler() {
     await updateItem('campaigns', queued.id, { offset: newOffset, smtpIndex: tIdx, sent: (queued.sent || 0) + batchSent, failed: (queued.failed || 0) + batchFailed, status: done ? 'done' : 'queued', abStats });
     if (newBounced.length) await batchAdd('bounced', newBounced.map(email => ({ email, bounceType: 'hard' })));
     if (logs.length) await batchAdd('logs', logs);
+
+    // Log auto-deletions to console for visibility
+    if (autoDeletedSmtps.length) {
+      console.log(`[AutoDelete] Removed ${autoDeletedSmtps.length} dead SMTP(s) this batch: ${autoDeletedSmtps.join(', ')}`);
+    }
 
   } catch (err) { console.error('Cron error:', err.message); }
 }
